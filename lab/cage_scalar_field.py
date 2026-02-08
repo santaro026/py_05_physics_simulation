@@ -174,7 +174,17 @@ class Bearing:
             l2 = self.Cage.pockets_lines[i][1]
             self.distances[i] = np.array([l1.distance(b.center) - b.radius, l2.distance(b.center) - b.radius])
             self.n_vct[i] = np.array([l1.projection(b.center) - b.center, l2.projection(b.center) -b.center])
+            self.n_vct[i] = self.n_vct[i] / np.linalg.norm(self.n_vct[i])
             self.p_contact[i] = np.array([l1.projection(b.center), l2.projection(b.center)])
+    def calc_contact_force(self, k=1, d=1):
+        self.forces = np.zeros((self.Ball.num_balls, 2, 2))
+        for i in range(self.Ball.num_balls):
+            if self.distances[i][0] <= 0:
+                _f = -k * self.distances[i, 0] ** d
+                self.forces[i, 0] = _f * self.n_vct[i, 0]
+            if self.distances[i][1] <= 0:
+                _f = -k * self.distances[i, 1] ** d
+                self.forces[i, 1] = _f * self.n_vct[i, 1]
     def visualize(self):
         plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.SQUARE_FIG)
         fig, axs = plotter.myfig()
@@ -196,9 +206,9 @@ class Bearing:
             axs[0].add_line(_l2)
             axs[0].scatter(self.Cage.pockets_centers[i].x, self.Cage.pockets_centers[i].y, s=10, c='b' )
             if self.distances[i, 0] <= 0:
-                axs[0].quiver(self.p_contact[i, 0, 0], self.p_contact[i, 0, 1], self.n_vct[i, 0, 0], self.n_vct[i, 0, 1], color='k', width=0.002)
+                axs[0].quiver(self.p_contact[i, 0, 0], self.p_contact[i, 0, 1], self.forces[i, 0, 0], self.forces[i, 0, 1], color='k', width=0.002)
             if self.distances[i, 1] <= 0:
-                axs[0].quiver(self.p_contact[i, 1, 0], self.p_contact[i, 1, 1], self.n_vct[i, 1, 0], self.n_vct[i, 1, 1], color='k', width=0.002)
+                axs[0].quiver(self.p_contact[i, 1, 0], self.p_contact[i, 1, 1], self.forces[i, 1, 0], self.forces[i, 1, 1], color='k', width=0.002)
         axs[0].add_patch(groove_a)
         axs[0].add_patch(groove_b)
         _id = patches.Circle(self.Cage.ring_outlines[0].center, self.Cage.ring_outlines[0].radius, color='b', fill=False)
@@ -225,4 +235,5 @@ if __name__ == "__main__":
 
     bearing = Bearing(aring, bring, ball, cage)
     bearing.calc_contact()
+    bearing.calc_contact_force()
     bearing.visualize()
