@@ -13,12 +13,17 @@ from matplotlib import patches
 import matplotlib.lines as mlines
 
 from pathlib import Path
+import pickle
+import sys
+
+import multiprocessing as mp
 
 from sympy import Point, Line, Circle, sqrt
 from sympy import Point3D, Line3D, Plane
-from sympy import Matrix, sin, cos, tan
+from sympy import Matrix, sin, cos, tan, rad, asin, acos, atan2
 
-from santamods import mycoord, myplotter
+from santamods import mycoord, myplotter, mylogger
+import config
 
 x_axis = Line3D(Point3D(0, 0, 0), direction_ratio=[1, 0, 0])
 y_axis = Line3D(Point3D(0, 0, 0), direction_ratio=[0, 1, 0])
@@ -35,11 +40,10 @@ def rotatex(point, theta, center=np.zeros(3)):
         [0, sin(theta), cos(theta)],
     ])
     v_rot = R * v
-    x = v_rot[0] + center.x
-    y = v_rot[1] + center.y
-    z = v_rot[2] + center.z
+    x = v_rot[0] + center[0]
+    y = v_rot[1] + center[1]
+    z = v_rot[2] + center[2]
     return Point3D(x, y, z)
-
 def rotatey(point, theta, center=np.zeros(3)):
     px = point.x - center[0]
     py = point.y - center[1]
@@ -51,11 +55,10 @@ def rotatey(point, theta, center=np.zeros(3)):
         [-sin(theta), 0, cos(theta)],
     ])
     v_rot = R * v
-    x = v_rot[0] + center.x
-    y = v_rot[1] + center.y
-    z = v_rot[2] + center.z
+    x = v_rot[0] + center[0]
+    y = v_rot[1] + center[1]
+    z = v_rot[2] + center[2]
     return Point3D(x, y, z)
-
 def rotatez(point, theta, center=np.zeros(3)):
     px = point.x - center[0]
     py = point.y - center[1]
@@ -67,11 +70,10 @@ def rotatez(point, theta, center=np.zeros(3)):
         [0, 0, 1],
     ])
     v_rot = R * v
-    x = v_rot[0] + center.x
-    y = v_rot[1] + center.y
-    z = v_rot[2] + center.z
+    x = v_rot[0] + center[0]
+    y = v_rot[1] + center[1]
+    z = v_rot[2] + center[2]
     return Point3D(x, y, z)
-
 def get_rigid_rotation_matrix(cage, theta):
     x = cage[0]
     y = cage[1]
@@ -89,12 +91,10 @@ def get_rigid_rotation_matrix(cage, theta):
         [uz*ux*C - uy*s, uz*uy*C + ux*s, c + uz**2*C   ]
     ])
     return R
-
 def rotate_rigid(point, R, center=np.zeros(3)):
     v = Matrix([point.x - center[0], point.y - center[1], point.z - center[2]])
     v_rot = R * v
-    return Point3D([v_rot[0] + center.x, v_rot[1] + center.y, v_rot[2] + center.z])
-
+    return Point3D([v_rot[0] + center[0], v_rot[1] + center[1], v_rot[2] + center[2]])
 
 class ARing:
     def __init__(self, name="", PCD=50, ID=48, OD=52,  R=3.2):
@@ -134,35 +134,50 @@ class Ball:
         self.PCD = PCD
         self.num_balls = num_balls
         self.Dw = Dw
+        self.center = Point3D(0, 0, 0)
         self.pos_balls = np.linspace(0, 2*np.pi, self.num_balls, endpoint=False) + np.pi/2
         self.ball_centers = []
         for i in range(self.num_balls):
-            _c = rotatex(Point3D(0, 0, 0).translate(0, self.PCD/2, 0), self.pos_balls[i], Point3D(0, 0, 0))
+            _c = rotatex(Point3D(0, 0, 0).translate(0, self.PCD/2, 0), self.pos_balls[i])
             self.ball_centers.append(_c)
     def translate(self, xyz):
+        self.center = self.center.translate(xyz[0], xyz[1], xyz[2])
         for i in range(self.num_balls):
             self.ball_centers[i] = self.ball_centers[i].translate(xyz[0], xyz[1], xyz[2])
     def rotatex(self, theta, center=np.zeros(3)):
+        self.center = rotatex(self.center, theta, center=center)
         for i in range(self.num_balls):
             self.ball_centers[i] = rotatex(self.ball_centers[i], theta, center)
     def rotatey(self, theta, center=np.zeros(3)):
+        self.center = rotatey(self.center, theta, center=center)
         for i in range(self.num_balls):
             self.ball_centers[i] = rotatey(self.ball_centers[i], theta, center)
     def rotatez(self, theta, center=np.zeros(3)):
+        self.center = rotatez(self.center, theta, center=center)
         for i in range(self.num_balls):
             self.ball_centers[i] = rotatez(self.ball_centers[i], theta, center)
     def tilt(self, xyz, theta, center=np.zeros(3)):
         R = get_rigid_rotation_matrix(Point3D(xyz[0], xyz[1], xyz[2]), theta=theta)
         for i in range(self.num_balls):
+            self.ball_centers[i] = self.ball_centers[i].translate(-xyz[0], -xyz[1], -xyz[2])
             self.ball_centers[i] = rotate_rigid(self.ball_centers[i], R, center)
-    def visualize(self):
+            self.ball_centers[i] = self.ball_centers[i].translate(xyz[0], xyz[1], xyz[2])
+    def visualize(self, plane="yz"):
+        axis_dict = {'x': 0, 'y': 1, 'z': 2}
+        _x = axis_dict[plane[0]]
+        _y = axis_dict[plane[1]]
         plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.SQUARE_FIG)
         fig, axs = plotter.myfig()
+        center = [self.center.x, self.center.y, self.center.y]
+        axs[0].scatter(center[_x], center[_y], s=10, c='b')
         for i in range(self.num_balls):
             _c = np.array([self.ball_centers[i].x, self.ball_centers[i].y, self.ball_centers[i].z])
-            _b = patches.Circle((_c[1], _c[2]), self.Dw/2, color='k', fill=False)
+            _b = patches.Circle((_c[_x], _c[_y]), self.Dw/2, color='k', fill=False)
             axs[0].add_patch(_b)
+            axs[0].scatter(_c[_x], _c[_y], s=10, c='k')
         axs[0].set(xlim=(-30, 30), ylim=(-30, 30))
+        axs[0].axhline(y=0, c='k', lw=1)
+        axs[0].axvline(x=0, c='k', lw=1)
         plt.show()
 
 class SimpleCage:
@@ -172,55 +187,45 @@ class SimpleCage:
         self.PCD = PCD
         self.ID = ID
         self.OD = OD
-        # self.ring_outlines = [Circle((0, 0), self.ID/2), Circle((0, 0), self.OD/2)]
         self.width = width
         self.num_pockets = num_pockets
         self.Dp = Dp
         self.pos_pockets = np.linspace(0, 2*np.pi, self.num_pockets, endpoint=False) + np.pi/2
         self.pocket_centers = []
         for i in range(self.num_pockets):
-            # _c = Point3D(0, 0, 0).translate(0, self.PCD/2, 0).rotate(self.pos_pockets[i], x_axis)
-            _c = Point3D(20, 20, 20).rotate(self.pos_pockets[i], x_axis, Point3D(0, 0, 0))
-            print(np.degrees(self.pos_pockets[i]))
-            print(_c.evalf())
+            _c = rotatex(Point3D(0, self.PCD/2, 0), self.pos_pockets[i])
             self.pocket_centers.append(_c)
         self.history = []
     def _generate_pocket_line(self):
-        for k, v1, v2 in self.history:
-            translate_history = np.zeros(3)
-            rotate_history = []
-            if k == "translate":
-                translate_history += np.asarray(v1)
-            elif k == "rotate":
-                rotate_history.append([v1, v2])
         _theta_id = np.arcsin(self.Dp / self.ID)
         _theta_od = np.arcsin(self.Dp / self.OD)
-        l0x = -(self.PCD - self.ID * np.cos(_theta_id))/2
-        l1x = (self.OD * np.cos(_theta_od) - self.PCD)/2
-        l0y = self.Dp/2
-        l1y = -self.Dp/2
-        l00 = Point3D(0, l0x, l0y)
-        l01 = Point3D(0, l1x, l0y)
-        l10 = Point3D(0, l0x, l1y)
-        l11 = Point3D(0, l1x, l1y)
+        l0y = -(self.PCD - self.ID * np.cos(_theta_id))/2
+        l1y = (self.OD * np.cos(_theta_od) - self.PCD)/2
+        l0z = self.Dp/2
+        l1z = -self.Dp/2
+        l00 = Point3D(0, l0y, l0z)
+        l01 = Point3D(0, l1y, l0z)
+        l10 = Point3D(0, l0y, l1z)
+        l11 = Point3D(0, l1y, l1z)
         self.pocket_lines = []
-        tx, ty, tz = translate_history
         for i in range(self.num_pockets):
-            _l00 = l00.translate(0, self.PCD/2, 0).rotate(self.pos_pockets[i], x_axis)
-            _l01 = l01.translate(0, self.PCD/2, 0).rotate(self.pos_pockets[i], x_axis)
-            _l10 = l10.translate(0, self.PCD/2, 0).rotate(self.pos_pockets[i], x_axis)
-            _l11 = l10.translate(0, self.PCD/2, 0).rotate(self.pos_pockets[i], x_axis)
-            for _theta, _axis in rotate_history:
-                _l00 = _l00.rotate(_theta, _axis)
-                _l01 = _l01.rotate(_theta, _axis)
-                _l10 = _l10.rotate(_theta, _axis)
-                _l11 = _l11.rotate(_theta, _axis)
-            _l00 = _l00.translate(tx, ty, tz)
-            _l01 = _l01.translate(tx, ty, tz)
-            _l10 = _l10.translate(tx, ty, tz)
-            _l11 = _l11.translate(tx, ty, tz)
-            _l0 = Line3D(_l00, l01)
-            _l1 = Line3D(_l10, l11)
+            _l00 = rotatex(l00.translate(0, self.PCD/2, 0), self.pos_pockets[i])
+            _l01 = rotatex(l01.translate(0, self.PCD/2, 0), self.pos_pockets[i])
+            _l10 = rotatex(l10.translate(0, self.PCD/2, 0), self.pos_pockets[i])
+            _l11 = rotatex(l11.translate(0, self.PCD/2, 0), self.pos_pockets[i])
+            for k, v1, v2, v3 in self.history:
+                if k == "translate":
+                    _l00 = _l00.translate(v1[0], v1[1], v1[2])
+                    _l01 = _l01.translate(v1[0] ,v1[1], v1[2])
+                    _l10 = _l10.translate(v1[0], v1[1], v1[2])
+                    _l11 = _l11.translate(v1[0], v1[1], v1[2])
+                if k == "rotate":
+                    _l00 = v1(_l00, v2, v3)
+                    _l01 = v1(_l01, v2, v3)
+                    _l10 = v1(_l10, v2, v3)
+                    _l11 = v1(_l11, v2, v3)
+            _l0 = Line3D(_l00, _l01)
+            _l1 = Line3D(_l10, _l11)
             _ls = [_l0, _l1]
             self.pocket_lines.append(_ls)
     # def _generate_outline(self):
@@ -235,13 +240,26 @@ class SimpleCage:
         for i in range(self.num_pockets):
             self.pocket_centers[i] = self.pocket_centers[i].translate(xyz[0], xyz[1], xyz[2])
         self.cage = self.cage.translate(xyz[0], xyz[1], xyz[2])
-        self.history.append(["translate", xyz, None])
-    def rotate(self, theta, axis):
+        self.history.append(["translate", xyz, None, None])
+    def rotatex(self, theta, center=np.zeros(3)):
         for i in range(self.num_pockets):
-            self.pocket_centers[i] = self.pocket_centers[i].rotate(theta, axis)
-        self.cage = self.cage.rotate(theta, axis)
-        self.history.append(["rotate", theta, axis])
-    def visualize(self):
+            self.pocket_centers[i] = rotatex(self.pocket_centers[i], theta, center)
+        self.cage = rotatex(self.cage, theta, center)
+        self.history.append(["rotate", rotatex, theta, center])
+    def rotatey(self, theta, center=np.zeros(3)):
+        for i in range(self.num_pockets):
+            self.pocket_centers[i] = rotatey(self.pocket_centers[i], theta, center)
+        self.cage = rotatey(self.cage, theta, center)
+        self.history.append(["rotate", rotatey, theta, center])
+    def rotatez(self, theta, center=np.zeros(3)):
+        for i in range(self.num_pockets):
+            self.pocket_centers[i] = rotatez(self.pocket_centers[i], theta, center)
+        self.cage = rotatez(self.cage, theta, center)
+        self.history.append(["rotate", rotatez, theta, center])
+    def visualize(self, plane="yz"):
+        axis_dict = {'x': 0, 'y': 1, 'z': 2}
+        _x = axis_dict[plane[0]]
+        _y = axis_dict[plane[1]]
         plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.SQUARE_FIG)
         fig, axs = plotter.myfig()
         self._generate_pocket_line()
@@ -252,172 +270,273 @@ class SimpleCage:
             _p21 = np.array(self.pocket_lines[i][1].p1)
             _p22 = np.array(self.pocket_lines[i][1].p2)
             _p2 = np.column_stack([_p21, _p22])
-            _l1 = mlines.Line2D(_p1[1], _p1[2], color='b')
-            _l2 = mlines.Line2D(_p2[1], _p2[2], color='b')
+            _l1 = mlines.Line2D(_p1[_x], _p1[_y], color='b')
+            _l2 = mlines.Line2D(_p2[_x], _p2[_y], color='b')
             axs[0].add_line(_l1)
             axs[0].add_line(_l2)
-            axs[0].scatter(self.pocket_centers[i].y, self.pocket_centers[i].z, s=10, c='b' )
-        _id = patches.Circle(np.zeros(3), self.ID/2, color='k', fill=False)
-        _od = patches.Circle(np.zeros(3), self.OD/2, color='k', fill=False)
+            _c = np.array([self.pocket_centers[i].x, self.pocket_centers[i].y, self.pocket_centers[i].z])
+            axs[0].scatter(_c[_x], _c[_y], s=10, c='b' )
+        _c = [self.cage.x, self.cage.y, self.cage.z]
+        _c = [_c[_x], _c[_y]]
+        _id = patches.Circle(_c, self.ID/2, color='k', fill=False)
+        _od = patches.Circle(_c, self.OD/2, color='k', fill=False)
         axs[0].add_patch(_id)
         axs[0].add_patch(_od)
         axs[0].set(xlim=(-30, 30), ylim=(-30, 30))
         plt.show()
 
 class Bearing:
-    def __init__(self, ARing, BRing, Ball, Cage, Ball3d=None):
-        self.aring = ARing
-        self.bring = BRing
-        self.ball = Ball
-        self.ball3d = Ball3d
-        self.cage = Cage
-    def calc_contact(self):
-        self.distances = np.zeros((self.ball.num_balls, 2))
-        self.n_vct = np.zeros((self.ball.num_balls, 2, 2))
-        self.p_contact = np.zeros((self.ball.num_balls, 2, 2))
+    def __init__(self, aring, bring, ball, cage):
+        self.aring = aring
+        self.bring = bring
+        self.ball = ball
+        self.cage = cage
+        self.distances = np.zeros(self.ball.num_balls)
+        self.n_vct = np.zeros((self.ball.num_balls, 3))
+        self.n_vct_local = np.zeros((self.ball.num_balls, 3))
+        self.p_contact = np.zeros((self.ball.num_balls, 3))
+        self.normal = np.zeros((self.ball.num_balls, 3))
+        self.fric = np.zeros((self.ball.num_balls, 3))
+        self.force = np.zeros((self.ball.num_balls, 3))
+    def calc_contact_ball2cylinder(self):
         for i in range(self.ball.num_balls):
-            b = self.ball.balls_circles[i]
-            l1 = self.cage.pockets_lines[i][0]
-            l2 = self.cage.pockets_lines[i][1]
-            self.distances[i] = np.array([l1.distance(b.center) - b.radius, l2.distance(b.center) - b.radius])
-            self.n_vct[i] = np.array([l1.projection(b.center) - b.center, l2.projection(b.center) -b.center])
-            self.n_vct[i] = self.n_vct[i] / np.linalg.norm(self.n_vct[i])
-            self.p_contact[i] = np.array([l1.projection(b.center), l2.projection(b.center)])
-    def calc_contact_force(self, k=1, d=1):
-        self.forces = np.zeros((self.ball.num_balls, 2, 2))
-        for i in range(self.ball.num_balls):
-            if self.distances[i][0] <= 0:
-                _f = -k * self.distances[i, 0] ** d
-                self.forces[i, 0] = _f * self.n_vct[i, 0]
-            if self.distances[i][1] <= 0:
-                _f = -k * self.distances[i, 1] ** d
-                self.forces[i, 1] = _f * self.n_vct[i, 1]
-    def visualize(self):
-        plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.SQUARE_FIG)
-        fig, axs = plotter.myfig()
-        if ARing:
-            groove_a = patches.Circle((0, 0), self.aring.groove.radius, color='k', fill=False)
-        if BRing:
-            groove_b = patches.Circle((0, 0), self.bring.groove.radius, color='k', fill=False)
-        for i in range(self.ball.num_balls):
-            _b = patches.Circle(self.ball.balls_circles[i].center, self.ball.balls_circles[i].radius, color='k', fill=False)
-            axs[0].add_patch(_b)
-        for i in range(self.cage.num_pockets):
-            _p11 = np.array(self.cage.pockets_lines[i][0].p1)
-            _p12 = np.array(self.cage.pockets_lines[i][0].p2)
-            _p1 = np.column_stack([_p11, _p12])
-            _p21 = np.array(self.cage.pockets_lines[i][1].p1)
-            _p22 = np.array(self.cage.pockets_lines[i][1].p2)
-            _p2 = np.column_stack([_p21, _p22])
-            _l1 = mlines.Line2D(_p1[0], _p1[1], color='b')
-            _l2 = mlines.Line2D(_p2[0], _p2[1], color='b')
-            axs[0].add_line(_l1)
-            axs[0].add_line(_l2)
-            axs[0].scatter(self.cage.pocket_centers[i].x, self.cage.pocket_centers[i].y, s=10, c='b' )
-            if self.distances[i, 0] <= 0:
-                axs[0].quiver(self.p_contact[i, 0, 0], self.p_contact[i, 0, 1], self.forces[i, 0, 0], self.forces[i, 0, 1], color='k', width=0.002)
-            if self.distances[i, 1] <= 0:
-                axs[0].quiver(self.p_contact[i, 1, 0], self.p_contact[i, 1, 1], self.forces[i, 1, 0], self.forces[i, 1, 1], color='k', width=0.002)
-        axs[0].add_patch(groove_a)
-        axs[0].add_patch(groove_b)
-        _id = patches.Circle(self.cage.ring_outlines[0].center, self.cage.ring_outlines[0].radius, color='b', fill=False)
-        _od = patches.Circle(self.cage.ring_outlines[1].center, self.cage.ring_outlines[1].radius, color='b', fill=False)
-        axs[0].add_patch(_id)
-        axs[0].add_patch(_od)
-        axs[0].set(xlim=(-30, 30), ylim=(-30, 30))
-        plt.show()
-    def calc_contact3D(self):
-        self.distances = np.zeros(self.ball3d.num_balls)
-        self.n_vct = np.zeros((self.ball3d.num_balls, 3))
-        self.n_vct_local = np.zeros((self.ball3d.num_balls, 3))
-        self.p_contact = np.zeros((self.ball3d.num_balls, 3))
-        for i in range(self.ball3d.num_balls):
-            _b = self.ball3d.ball_centers[i]
-            b = Point3D(_b.x, _b.y, _b.z)
-            _p = self.cage.pocket_centers[i]
-            p = Point3D(0, _p.x, _p.y)
-            b = rotatex(b, -self.cage.pos_pockets[i]).translate(0, -self.cage.PCD/2, 0)
-            p = rotatex(p, -self.cage.pos_pockets[i]).translate(0, -self.cage.PCD/2, 0)
-            b = Point3D(b.x, 0, b.z)
-            p = Point3D(p.x, 0, p.z)
-            self.distances[i] = self.cage.Dp/2 - p.distance(b) - self.ball.Dw/2
-            n_vct = rotatex(Point3D(b.x, 0, b.z), self.cage.pos_pockets[i])
-            self.n_vct_local[i] = np.array([b.x, 0, b.z])
-            print("\n", i)
-            print("v: ", float(b.x), float(b.y), float(b.z))
-            print("d: ", self.distances[i])
+            ball = self.ball.ball_centers[i]
+            pocket = self.cage.pocket_centers[i]
+            ball = rotatex(ball, -self.cage.pos_pockets[i]).translate(0, -self.cage.PCD/2, 0) # to pocket local coord
+            pocket = rotatex(pocket, -self.cage.pos_pockets[i]).translate(0, -self.cage.PCD/2, 0) # to pocket local coord
+            ball_zx = Point3D(ball.x, 0, ball.z)
+            pocket_zx = Point3D(pocket.x, 0, pocket.z)
+            self.distances[i] = self.cage.Dp/2 - pocket_zx.distance(ball_zx) - self.ball.Dw/2
+            n_vct = rotatex(Point3D(ball.x, 0, ball.z), self.cage.pos_pockets[i])
+            self.n_vct_local[i] = np.array([ball.x, 0, ball.z])
             self.n_vct[i] = np.array([n_vct.x, n_vct.y, n_vct.z])
             self.n_vct[i] = self.n_vct[i] / np.linalg.norm(self.n_vct[i])
-            self.p_contact[i] = np.array([0, _p.x, _p.y])
-    def calc_contact_force3D(self, k=1, d=1, eta=0.2):
-        self.normal = np.zeros((self.ball3d.num_balls, 3))
-        self.fric = np.zeros((self.ball3d.num_balls, 3))
-        self.force = np.zeros((self.ball3d.num_balls, 3))
-        for i in range(self.ball3d.num_balls):
+            theta = atan2(ball.x, ball.z)
+            _c2d = Circle((0, 0), self.cage.Dp/2)
+            _cpz = _c2d.center.x + _c2d.radius * cos(theta)
+            _cpx = _c2d.center.y + _c2d.radius * sin(theta)
+            p_contact_local = Point3D(_cpx, ball.y, _cpz)
+            p_contact = rotatex(p_contact_local.translate(0, self.cage.PCD/2, 0), self.cage.pos_pockets[i])
+            self.p_contact[i] = np.array([p_contact.x, p_contact.y, p_contact.z])
+    def calc_contact_force(self, k=1, d=1, eta=0.2):
+        for i in range(self.ball.num_balls):
             if self.distances[i] <= 0:
                 _f = -k * self.distances[i] ** d
-                self.normal[i] = _f * self.n_vct[i]
+                n_vct = Matrix([self.n_vct[i, 0], self.n_vct[i, 1], self.n_vct[i, 2]])
+                normal = _f * n_vct
+                self.normal[i] = np.array([normal[0], normal[1], normal[2]])
                 if self.n_vct_local[i, 2] >= 0:
                     dir_fric = rotatex(Point3D(0, 1, 0), self.cage.pos_pockets[i])
                 elif self.n_vct_local[i, 2] <= 0:
                     dir_fric = rotatex(Point3D(0, -1, 0), self.cage.pos_pockets[i])
                 self.fric[i] = eta * np.linalg.norm(self.normal[i]) * np.array([dir_fric.x, dir_fric.y, dir_fric.z])
                 self.force[i] = self.normal[i] + self.fric[i]
-    def visualize3D(self):
+    def visualize(self, plane="yz", vwidth=0.004, vscale=0.01):
+        axis_dict = {'x': 0, 'y': 1, 'z': 2}
+        _x = axis_dict[plane[0]]
+        _y = axis_dict[plane[1]]
         plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.SQUARE_FIG)
         fig, axs = plotter.myfig()
-        if ARing:
+        if self.aring:
             groove_a = patches.Circle((0, 0), self.aring.groove.radius, color='k', fill=False)
-        if BRing:
+            axs[0].add_patch(groove_a)
+        if self.bring:
             groove_b = patches.Circle((0, 0), self.bring.groove.radius, color='k', fill=False)
+            axs[0].add_patch(groove_b)
+        center = [self.ball.center.x, self.ball.center.y, self.ball.center.y]
+        axs[0].scatter(center[_x], center[_y], s=10, c='b')
         for i in range(self.ball.num_balls):
-            _b = patches.Circle((self.ball3d.ball_centers[i].y, self.ball3d.ball_centers[i].z), self.ball.Dw/2, color='k', fill=False)
+            _c = np.array([self.ball.ball_centers[i].x, self.ball.ball_centers[i].y, self.ball.ball_centers[i].z])
+            _b = patches.Circle((_c[_x], _c[_y]), self.ball.Dw/2, color='k', fill=False)
             axs[0].add_patch(_b)
+            axs[0].scatter(_c[_x], _c[_y], s=10, c='k')
+        self.cage._generate_pocket_line()
         for i in range(self.cage.num_pockets):
-            _p11 = np.array(self.cage.pockets_lines[i][0].p1)
-            _p12 = np.array(self.cage.pockets_lines[i][0].p2)
+            _p11 = np.array(self.cage.pocket_lines[i][0].p1)
+            _p12 = np.array(self.cage.pocket_lines[i][0].p2)
             _p1 = np.column_stack([_p11, _p12])
-            _p21 = np.array(self.cage.pockets_lines[i][1].p1)
-            _p22 = np.array(self.cage.pockets_lines[i][1].p2)
+            _p21 = np.array(self.cage.pocket_lines[i][1].p1)
+            _p22 = np.array(self.cage.pocket_lines[i][1].p2)
             _p2 = np.column_stack([_p21, _p22])
-            _l1 = mlines.Line2D(_p1[0], _p1[1], color='b')
-            _l2 = mlines.Line2D(_p2[0], _p2[1], color='b')
+            _l1 = mlines.Line2D(_p1[_x], _p1[_y], color='b')
+            _l2 = mlines.Line2D(_p2[_x], _p2[_y], color='b')
             axs[0].add_line(_l1)
             axs[0].add_line(_l2)
-            axs[0].scatter(self.cage.pocket_centers[i].x, self.cage.pocket_centers[i].y, s=10, c='b' )
+            _c = np.array([self.cage.pocket_centers[i].x, self.cage.pocket_centers[i].y, self.cage.pocket_centers[i].z])
+            axs[0].scatter(_c[_x], _c[_y], s=10, c='b' )
             if self.distances[i] <= 0:
-                scale = 0.04
-                axs[0].quiver(self.p_contact[i, 1], self.p_contact[i, 2], self.normal[i, 1], self.normal[i, 2], color='b', width=0.002, scale_units="xy", angles="xy", scale=scale)
-                axs[0].quiver(self.p_contact[i, 1], self.p_contact[i, 2], self.fric[i, 1], self.fric[i, 2], color='r', width=0.002, scale_units="xy", angles="xy", scale=scale)
-                axs[0].quiver(self.p_contact[i, 1], self.p_contact[i, 2], self.force[i, 1], self.force[i, 2], color='k', width=0.002, scale_units="xy", angles="xy", scale=scale)
-        axs[0].add_patch(groove_a)
-        axs[0].add_patch(groove_b)
-        _id = patches.Circle(self.cage.ring_outlines[0].center, self.cage.ring_outlines[0].radius, color='b', fill=False)
-        _od = patches.Circle(self.cage.ring_outlines[1].center, self.cage.ring_outlines[1].radius, color='b', fill=False)
+                cage_xyz = -np.array([self.ball.center.x, self.ball.center.y, self.ball.center.z], dtype=float)
+                _n = np.cross(np.array([1, 0, 0]), cage_xyz)
+                _n = _n / np.linalg.norm(_n)
+                _f = np.dot(self.normal[i], _n) * _n
+                axs[0].quiver(self.p_contact[i, _x], self.p_contact[i, _y], _f[_x], _f[_y], color='b', width=vwidth, scale_units="xy", angles="xy", scale=vscale)
+                _f = np.dot(self.fric[i], _n) * _n
+                axs[0].quiver(self.p_contact[i, _x], self.p_contact[i, _y], _f[_x], _f[_y], color='r', width=vwidth, scale_units="xy", angles="xy", scale=vscale)
+                # axs[0].quiver(self.p_contact[i, _x], self.p_contact[i, _y], self.normal[i, _x], self.normal[i, _y], color='b', width=vwidth, scale_units="xy", angles="xy", scale=vscale)
+                # axs[0].quiver(self.p_contact[i, _x], self.p_contact[i, _y], self.fric[i, _x], self.fric[i, _y], color='r', width=vwidth, scale_units="xy", angles="xy", scale=vscale)
+                # axs[0].quiver(self.p_contact[i, _x], self.p_contact[i, _y], self.force[i, _x], self.force[i, _y], color='k', width=vwidth, scale_units="xy", angles="xy", scale=vscale)
+        _c = [self.cage.cage.x, self.cage.cage.y, self.cage.cage.z]
+        _c = [_c[_x], _c[_y]]
+        _id = patches.Circle(_c, self.cage.ID/2, color='k', fill=False)
+        _od = patches.Circle(_c, self.cage.OD/2, color='k', fill=False)
         axs[0].add_patch(_id)
         axs[0].add_patch(_od)
         axs[0].set(xlim=(-30, 30), ylim=(-30, 30))
+        axs[0].axhline(y=0, c='k', lw=1)
+        axs[0].axvline(x=0, c='k', lw=1)
         plt.show()
+
+def calc_scalar_field(N=21, xyrange=0.1, theta=np.radians(0), name="scalar_field"):
+    logger = mylogger.MyLogger(name, outdir=outdir, mode='w')
+    logger.measure_time("main", 's')
+    cage = SimpleCage()
+    aring = None
+    bring = None
+    Y, Z = np.meshgrid(np.linspace(-xyrange, xyrange, N, endpoint=True), np.linspace(-xyrange, xyrange, N, endpoint=True))
+    fric = np.zeros((N, N, 3))
+    total = N * N
+    c = 0
+    for i in range(N):
+        for j in range(N):
+            ball = Ball()
+            bearing = Bearing(aring, bring, ball, cage)
+            ball_xyz = -np.array([0, Y[i, j], Z[i, j]])
+            ball.tilt(ball_xyz, -theta)
+            ball.translate(ball_xyz)
+            bearing.calc_contact_ball2cylinder()
+            bearing.calc_contact_force()
+            cage_xyz = -np.array([bearing.ball.center.x, bearing.ball.center.y, bearing.ball.center.z], dtype=float)
+            _n = np.cross(np.array([1, 0, 0]), cage_xyz)
+            _n = _n / np.linalg.norm(_n)
+            _fric = np.zeros(3)
+            for k in range(bearing.ball.num_balls):
+                _f = np.dot(bearing.fric[k], _n) * _n
+                _fric += _f
+            fric[i, j, :] = _fric
+            c += 1
+            progress = c / total * 100
+            if c % 20 == 0:
+                logger.info(f"progress: {progress:.1f} %, {c}/{total}")
+    plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.SQUARE_FIG)
+    fig, axs = plotter.myfig()
+    axs[0].quiver(Y, Z, fric[:, :, 1], fric[:, :, 2], scale_units="xy", angles="xy", scale=2, width=0.002, color='r')
+    # axs[0].set(xlim=(-xyrange, xyrange), ylim=(-xyrange, xyrange))
+    axs[0].set(xlim=(-0.5, 0.5), ylim=(-0.5, 0.5))
+    axs[0].axhline(y=0, c='k', lw=1)
+    axs[0].axvline(x=0, c='k', lw=1)
+    with open(outdir/f"{name}.pkl", "wb") as f:
+        pickle.dump(fric, f)
+    logger.measure_time("main", 'e')
+
+def calc_scalar_field_parallel(N=21, xyrange=0.1, theta=np.radians(0), name="scalar_field"):
+    import time
+    st = time.perf_counter()
+    logger = mylogger.MyLogger(name, outdir=outdir, mode='w')
+    logger.measure_time("main", 's')
+    cage = SimpleCage()
+    Y, Z = np.meshgrid(np.linspace(-xyrange, xyrange, N, endpoint=True), np.linspace(-xyrange, xyrange, N, endpoint=True))
+    fric = np.zeros((N, N, 3))
+    total = N * N
+    results = []
+    args_list = [(y, z, theta) for y, z in zip(Y.ravel(), Z.ravel())]
+    with mp.Pool(processes=mp.cpu_count()) as pool:
+        for i, res in enumerate(pool.imap(compute_pixel, args_list), 1):
+            results.append(res)
+            if i % 100 == 0 or i == total:
+                progress = i / total
+                _now = time.perf_counter()
+                logger.info(f"progress: {progress*100:.2f} %, estimated time: {(_now-st)/progress:.2f} [sec]\n")
+                # sys.stdout.write()
+                # sys.stdout.flush()
+        # results = pool.starmap(compute_pixel, args_list)
+    fric = np.array(results).reshape(N, N, 3)
+
+    with open(outdir/f"{name}.pkl", "wb") as f:
+        pickle.dump(fric, f)
+    logger.measure_time("main", 'e')
+
+# def compute_pixel(y, z, theta, aring=None, bring=None, cage=SimpleCage()):
+def compute_pixel(args):
+    y, z, theta = args
+    aring = None
+    bring = None
+    cage = SimpleCage()
+    ball = Ball()
+    bearing = Bearing(aring, bring, ball, cage)
+    ball_xyz = -np.array([0, y, z])
+    ball.tilt(ball_xyz, -theta)
+    ball.translate(ball_xyz)
+    bearing.calc_contact_ball2cylinder()
+    bearing.calc_contact_force()
+    cage_xyz = -np.array([bearing.ball.center.x, bearing.ball.center.y, bearing.ball.center.z], dtype=float)
+    _n = np.cross(np.array([1, 0, 0]), cage_xyz)
+    _n = _n / np.linalg.norm(_n)
+    _fric = np.zeros(3)
+    for k in range(bearing.ball.num_balls):
+        _f = np.dot(bearing.fric[k], _n) * _n
+        _fric += _f
+    return _fric
+
+
+def load_scalar_field_data(inputfile):
+    with open(inputfile, "rb") as f:
+        fric = pickle.load(f)
+    print(fric.shape)
+    fric_norm = np.linalg.norm(fric, axis=-1)
+    xyrange = 0.3
+    N = fric.shape[0]
+    Y, Z = np.meshgrid(np.linspace(-xyrange, xyrange, N, endpoint=True), np.linspace(-xyrange, xyrange, N, endpoint=True))
+    plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.SQUARE_FIG)
+    fig, axs = plotter.myfig()
+    axs[0].quiver(Y, Z, fric[:, :, 1], fric[:, :, 2], scale_units="xy", angles="xy", scale=2, width=0.001, color='r')
+    axs[0].pcolormesh(Y, Z, fric_norm, vmin=0, vmax=0.05, cmap="viridis")
+    # axs[0].set(xlim=(-xyrange, xyrange), ylim=(-xyrange, xyrange))
+    # axs[0].set(xlim=(-0.5, 0.5), ylim=(-0.5, 0.5))
+    axs[0].set(xlim=(-0.2, 0.2), ylim=(-0.2, 0.2))
+    axs[0].axhline(y=0, c='k', lw=1)
+    axs[0].axvline(x=0, c='k', lw=1)
+    return fig, axs
 
 
 if __name__ == "__main__":
     print("---- run ----")
-
-    cage = SimpleCage()
-    cage.translate((0, 0, 0))
-    cage.visualize()
-    ball = Ball()
-    xyz = (0, 0, 0.4)
-    # ball.tilt(xyz, np.radians(0))
-    # ball.visualize()
-    aring = ARing()
+    # vwidth = 0.004
+    # vscale = 0.002
+    # xyz = np.array([0, 0.3, 0])
+    # theta = np.arcsin((6.25-5.953) / 53.3)
+    # theta = 0
+    # xyz = -xyz
+    # theta = -theta
+    # plane = "yz"
+    # print(f"theta: {np.degrees(theta):.2f}")
+    # cage = SimpleCage()
+    # cage.translate((0, 0, 10))
+    # cage.rotatex(20)
+    # cage.translate((0, 0, 10))
+    # cage.visualize(plane="yz")
+    # ball = Ball()
+    # ball.tilt(xyz, theta)
+    # ball.visualize(plane="zx")
+    # aring = ARing()
+    # aring = None
     # aring.visualize()
-    bring = BRing()
+    # bring = BRing()
+    # bring = None
     # bring.visualize()
 
-
     # bearing = Bearing(aring, bring, ball, cage)
-    # bearing.calc_contact3D()
-    # bearing.calc_contact_force3D()
-    # bearing.visualize3D()
+    # ball.translate(xyz)
+    # bearing.calc_contact_ball2cylinder()
+    # bearing.calc_contact_force()
+    # bearing.visualize(plane=plane, vwidth=vwidth, vscale=vscale)
 
+    outdir = config.ROOT / "results" / "scalar_field"
+    outdir.mkdir(parents=True, exist_ok=True)
+    # calc_scalar_field_parallel(N=301, xyrange=0.3, theta=np.radians(0), name="theta0_xy03_N301")
+    calc_scalar_field_parallel(N=301, xyrange=0.3, theta=np.radians(0.33), name="theta033_xy03_N301")
+
+    # inpfilename = "theta0_xy03_N301.pkl"
+    # fig1, axs1 = load_scalar_field_data(outdir/inpfilename)
+    # inpfilename = "fric_N10_theta032.pkl"
+    # fig2, axs2 = load_scalar_field_data(outdir/inpfilename)
+    # plt.show()
