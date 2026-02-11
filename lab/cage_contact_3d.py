@@ -15,6 +15,7 @@ import matplotlib.lines as mlines
 from pathlib import Path
 import pickle
 import sys
+import time
 
 import multiprocessing as mp
 
@@ -318,10 +319,10 @@ class Bearing:
             p_contact_local = Point3D(_cpx, ball.y, _cpz)
             p_contact = rotatex(p_contact_local.translate(0, self.cage.PCD/2, 0), self.cage.pos_pockets[i])
             self.p_contact[i] = np.array([p_contact.x, p_contact.y, p_contact.z])
-    def calc_contact_force(self, k=1, d=1, eta=0.2):
+    def calc_contact_force(self, k=10**8, d=1, eta=0.2):
         for i in range(self.ball.num_balls):
             if self.distances[i] <= 0:
-                _f = -k * self.distances[i] ** d
+                _f = -k * (self.distances[i]/1000) ** d
                 n_vct = Matrix([self.n_vct[i, 0], self.n_vct[i, 1], self.n_vct[i, 2]])
                 normal = _f * n_vct
                 self.normal[i] = np.array([normal[0], normal[1], normal[2]])
@@ -428,75 +429,156 @@ def calc_scalar_field(N=21, xyrange=0.1, theta=np.radians(0), name="scalar_field
         pickle.dump(fric, f)
     logger.measure_time("main", 'e')
 
-def calc_scalar_field_parallel(N=21, xyrange=0.1, theta=np.radians(0), name="scalar_field"):
+def calc_scalar_field_parallel(N=21, xyrange=0.1, theta=np.radians(0), name="scalar_field", ncpu=None, log_freq=100):
     import time
     st = time.perf_counter()
     logger = mylogger.MyLogger(name, outdir=outdir, mode='w')
     logger.measure_time("main", 's')
-    cage = SimpleCage()
     Y, Z = np.meshgrid(np.linspace(-xyrange, xyrange, N, endpoint=True), np.linspace(-xyrange, xyrange, N, endpoint=True))
-    fric = np.zeros((N, N, 3))
     total = N * N
-    results = []
+    res_normal = []
+    res_fric = []
     args_list = [(y, z, theta) for y, z in zip(Y.ravel(), Z.ravel())]
-    with mp.Pool(processes=mp.cpu_count()) as pool:
+    if ncpu is None: ncpu = mp.cpu_count() - 1
+    with mp.Pool(processes=ncpu) as pool:
+        for i, res in enumerate(pool.imap(compute_pixel, args_list), 1):
+            normal, fric = res
+            res_normal.append(normal)
+            res_fric.append(fric)
+            if i % log_freq == 0 or i == total:
+                progress = i / total
+                _now = time.perf_counter()
+                logger.info(f"progress: {progress*100:.2f} % ({i}/{total}), estimated time: {(_now-st)*(1/progress-1):.2f} [sec]")
+    num_pockets = res_fric[0].shape[0]
+    res_normal = np.array(res_normal).reshape(N, N, num_pockets, 3)
+    res_fric = np.array(res_fric).reshape(N, N, num_pockets, 3)
+    with open(outdir/f"{name}_normal.pkl", "wb") as f:
+        pickle.dump(res_normal, f)
+    with open(outdir/f"{name}_fric.pkl", "wb") as f:
+        pickle.dump(res_fric, f)
+    logger.measure_time("main", 'e')
+
+def calc_fc_on_r_parallel(r=0.2, N=100, theta=np.radians(0), name="fc_on_r"):
+    st = time.perf_counter()
+    logger = mylogger.MyLogger(name, outdir=outdir, mode='w')
+    logger.measure_time("main", 's')
+    cage = SimpleCage()
+    t = np.linspace(0, 2*np.pi, N, endpoint=False)
+    y = r * np.cos(t)
+    z = r * np.sin(t)
+    fric = np.zeros((N, 3))
+    total = N
+    results = []
+    args_list = [(y, z, theta) for y, z in zip(y, z)]
+    with mp.Pool(processes=mp.cpu_count()-1) as pool:
         for i, res in enumerate(pool.imap(compute_pixel, args_list), 1):
             results.append(res)
             if i % 100 == 0 or i == total:
                 progress = i / total
                 _now = time.perf_counter()
-                logger.info(f"progress: {progress*100:.2f} %, estimated time: {(_now-st)/progress:.2f} [sec]\n")
-                # sys.stdout.write()
-                # sys.stdout.flush()
-        # results = pool.starmap(compute_pixel, args_list)
-    fric = np.array(results).reshape(N, N, 3)
-
+                logger.info(f"progress: {progress*100:.2f} %, estimated time: {(_now-st)*(1/progress-1):.2f} [sec]")
+    fric = np.array(results).reshape(N, 3)
     with open(outdir/f"{name}.pkl", "wb") as f:
         pickle.dump(fric, f)
     logger.measure_time("main", 'e')
 
-# def compute_pixel(y, z, theta, aring=None, bring=None, cage=SimpleCage()):
 def compute_pixel(args):
     y, z, theta = args
     aring = None
     bring = None
-    cage = SimpleCage()
-    ball = Ball()
+    cage = SimpleCage(num_pockets=8)
+    ball = Ball(num_balls=8)
     bearing = Bearing(aring, bring, ball, cage)
     ball_xyz = -np.array([0, y, z])
     ball.tilt(ball_xyz, -theta)
     ball.translate(ball_xyz)
     bearing.calc_contact_ball2cylinder()
     bearing.calc_contact_force()
-    cage_xyz = -np.array([bearing.ball.center.x, bearing.ball.center.y, bearing.ball.center.z], dtype=float)
-    _n = np.cross(np.array([1, 0, 0]), cage_xyz)
-    _n = _n / np.linalg.norm(_n)
-    _fric = np.zeros(3)
-    for k in range(bearing.ball.num_balls):
-        _f = np.dot(bearing.fric[k], _n) * _n
-        _fric += _f
-    return _fric
+    return bearing.normal, bearing.fric
 
+def resolve_force_2rc(force, position, axis=np.array([1, 0, 0])):
+    u = axis / np.linalg.norm(axis, axis=-1, keepdims=True)
+    pos = position - (np.sum(position * u, axis=-1, keepdims=True)) * u
+    r_norm = np.linalg.norm(pos, axis=-1, keepdims=True)
+    r_unit = np.divide(pos, r_norm, out=np.zeros_like(pos), where=r_norm!=0)
+    fr = np.sum(force * r_unit, axis=-1, keepdims=True) * r_unit # instead of np.dot
+    _c = np.cross(u, pos)
+    c_norm = np.linalg.norm(_c, axis=-1, keepdims=True)
+    c_unit = np.divide(_c, c_norm, out=np.zeros_like(pos), where=c_norm!=0)
+    fc = np.sum(force * c_unit, axis=-1, keepdims=True) * c_unit
+    return fr, fc
 
-def load_scalar_field_data(inputfile):
-    with open(inputfile, "rb") as f:
+def load_scalar_field_data(jobname, datadir=config.ROOT/"results"/"scalar_field"):
+    with open(datadir/f"{jobname}_normal.pkl", "rb") as f:
+        normal = pickle.load(f)
+    with open(datadir/f"{jobname}_fric.pkl", "rb") as f:
         fric = pickle.load(f)
-    print(fric.shape)
+    normal[np.isnan(normal)] = 0
+    normal = np.sum(normal, axis=-2)
+    normal_norm = np.linalg.norm(normal, axis=-1)
+    fric[np.isnan(fric)] = 0
+    fric = np.sum(fric, axis=-2)
     fric_norm = np.linalg.norm(fric, axis=-1)
     xyrange = 0.3
     N = fric.shape[0]
     Y, Z = np.meshgrid(np.linspace(-xyrange, xyrange, N, endpoint=True), np.linspace(-xyrange, xyrange, N, endpoint=True))
     plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.SQUARE_FIG)
-    fig, axs = plotter.myfig()
-    axs[0].quiver(Y, Z, fric[:, :, 1], fric[:, :, 2], scale_units="xy", angles="xy", scale=2, width=0.001, color='r')
-    axs[0].pcolormesh(Y, Z, fric_norm, vmin=0, vmax=0.05, cmap="viridis")
-    # axs[0].set(xlim=(-xyrange, xyrange), ylim=(-xyrange, xyrange))
-    # axs[0].set(xlim=(-0.5, 0.5), ylim=(-0.5, 0.5))
-    axs[0].set(xlim=(-0.2, 0.2), ylim=(-0.2, 0.2))
+    fig, axs = plotter.myfig(slide=True, xrange=(-0.5, 0.5), yrange=(-0.5, 0.5), xlabel="z [mm]", ylabel="y [mm]")
+    step = 4
+    # axs[0].quiver(Y[::step, ::step], Z[::step, ::step], normal[::step, ::step, 1], normal[::step, ::step, 2], scale_units="xy", angles="xy", scale=20, width=0.002, color='b')
+    # axs[0].quiver(Y[::step, ::step], Z[::step, ::step], fric[::step, ::step, 1], fric[::step, ::step, 2], scale_units="xy", angles="xy", scale=1, width=0.002, color='r')
+    # axs[0].pcolormesh(Y, Z, normal_norm, vmin=0.0, vmax=1, cmap="viridis")
+    # axs[0].pcolormesh(Y, Z, fric_norm, vmin=0.0, vmax=0.06, cmap="viridis")
     axs[0].axhline(y=0, c='k', lw=1)
     axs[0].axvline(x=0, c='k', lw=1)
+    axs[0].tick_params(axis='both', pad=14)
+    axs[0].set_aspect(1)
+    plt.show()
     return fig, axs
 
+def load_scalar_field_data_old(inputfile):
+    with open(inputfile, "rb") as f:
+        fric = pickle.load(f)
+    fric[np.isnan(fric)] = 0
+    fric_norm = np.linalg.norm(fric, axis=-1)
+    xyrange = 0.3
+    N = fric.shape[0]
+    Y, Z = np.meshgrid(np.linspace(-xyrange, xyrange, N, endpoint=True), np.linspace(-xyrange, xyrange, N, endpoint=True))
+    plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.SQUARE_FIG)
+    fig, axs = plotter.myfig(slide=True, xrange=(-0.2, 0.2), yrange=(-0.2, 0.2), xlabel="z [mm]", ylabel="y [mm]")
+    step = 4
+    # axs[0].quiver(Y[::step, ::step], Z[::step, ::step], fric[::step, ::step, 1], fric[::step, ::step, 2], scale_units="xy", angles="xy", scale=1, width=0.002, color='b')
+    axs[0].pcolormesh(Y, Z, fric_norm, vmin=0.0, vmax=0.06, cmap="viridis")
+    # axs[0].set(xlim=(-xyrange, xyrange), ylim=(-xyrange, xyrange))
+    # axs[0].set(xlim=(-0.5, 0.5), ylim=(-0.5, 0.5))
+    # axs[0].set(xlim=(-0.3, 0.3), ylim=(-0.3, 0.3))
+    axs[0].axhline(y=0, c='k', lw=1)
+    axs[0].axvline(x=0, c='k', lw=1)
+    axs[0].tick_params(axis='both', pad=14)
+    axs[0].set_aspect(1)
+    return fig, axs
+
+def load_fc_on_r_data_old(inputfilelist, r=0.2):
+    frics = []
+    for inputfile in inputfilelist:
+        with open(inputfile, "rb") as f:
+            fric = pickle.load(f)
+            frics.append(fric)
+    xyrange = 0.3
+    N = fric.shape[0]
+    t = np.linspace(0, 2*np.pi, N, endpoint=False)
+    y = r * np.cos(t)
+    z = r * np.sin(t)
+    plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.RECTANGLE_FIG)
+    fig, axs = plotter.myfig(slide=True, xsigf=0, ysigf=2, xlabel="angle of cage position [degree]", ylabel="circumferential component of the friction force", xrange=(0, 360), yrange=(0, 0.1))
+    colors = ['b', 'r', 'g', 'c', 'm', 'y', 'k']
+    for i in range(len(inputfilelist)):
+        axs[0].plot(np.degrees(t), np.linalg.norm(frics[i], axis=-1), lw=1, c=colors[i])
+    # axs[0].set(xlim=(-xyrange, xyrange), ylim=(-xyrange, xyrange))
+    # axs[0].set(xlim=(-0.5, 0.5), ylim=(-0.5, 0.5))
+    # axs[0].set(xlim=(-0.2, 0.2), ylim=(-0.2, 0.2))
+        axs[0].axvline(x=0, c='k', lw=1)
+    return fig, axs
 
 if __name__ == "__main__":
     print("---- run ----")
@@ -530,13 +612,44 @@ if __name__ == "__main__":
     # bearing.calc_contact_force()
     # bearing.visualize(plane=plane, vwidth=vwidth, vscale=vscale)
 
+    mp.set_start_method("spawn") # for linux
     outdir = config.ROOT / "results" / "scalar_field"
     outdir.mkdir(parents=True, exist_ok=True)
+    # calc_scalar_field_parallel(N=21, xyrange=0.5, theta=np.radians(0), name="scalar_theta0_xy05_N21")
     # calc_scalar_field_parallel(N=301, xyrange=0.3, theta=np.radians(0), name="theta0_xy03_N301")
-    calc_scalar_field_parallel(N=301, xyrange=0.3, theta=np.radians(0.33), name="theta033_xy03_N301")
+    # calc_scalar_field_parallel(N=301, xyrange=0.3, theta=np.radians(0.33), name="theta033_xy03_N301")
 
+    # calc_fc_on_r_parallel(r=0.2, N=100, theta=np.radians(0), name="fc_on_r02_theta0")
+    # calc_fc_on_r_parallel(r=0.2, N=100, theta=np.radians(0.33), name="fc_on_r02_theta033")
+
+    # fig1, axs1 = load_scalar_field_data("scalar_theta0_xy05_N21")
     # inpfilename = "theta0_xy03_N301.pkl"
     # fig1, axs1 = load_scalar_field_data(outdir/inpfilename)
-    # inpfilename = "fric_N10_theta032.pkl"
+    # inpfilename = "theta033_xy03_N301.pkl"
     # fig2, axs2 = load_scalar_field_data(outdir/inpfilename)
+    # inplist = [outdir/"fc_on_r02_theta0.pkl", outdir/"fc_on_r02_theta033.pkl", outdir/"fc_on_r018_theta033.pkl", outdir/"fc_on_r019_theta033.pkl", outdir/"fc_on_r022_theta033.pkl"]
+    # inplist = [outdir/"fc_on_r02_theta0.pkl", outdir/"fc_on_r02_theta033.pkl"]
+    # fig1, axs1 = load_fc_on_r_data(inplist, r=0.2)
+
     # plt.show()
+
+    n = 100
+    f = np.vstack([np.zeros(n), np.zeros(n), np.ones(n)]).T
+    x = np.zeros(n)
+    y = 5*np.cos(np.arange(n)/10)
+    z = 5*np.sin(np.arange(n)/10)
+
+    fr, fc = np.zeros((n, 3)), np.zeros((n, 3))
+    fr, fc = resolve_force_2rc(f, np.array([x, y, z]).T, axis=np.array([1, 0, 0]))
+
+    plotter = myplotter.MyPlotter(myplotter.PlotSizeCode.RECTANGLE_FIG)
+    fig, axs = plotter.myfig()
+    axs = axs[0]
+
+    axs.quiver(y, z, f[:, 1], f[:, 2], scale_units="xy", angles="xy", color='k', scale=1, width=0.002)
+    axs.quiver(y, z, fr[:, 1], fr[:, 2], scale_units="xy", angles="xy", color='b', scale=1, width=0.002)
+    axs.quiver(y, z, fc[:, 1], fc[:, 2], scale_units="xy", angles="xy", color='r', scale=1, width=0.002)
+
+    axs.set(xlim=(-10, 10), ylim=(-10, 10), aspect=1)
+    axs.grid()
+    plt.show()
